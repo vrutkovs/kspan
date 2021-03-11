@@ -16,8 +16,10 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/dynamic"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
@@ -35,6 +37,7 @@ type EventWatcher struct {
 	startTime time.Time
 	recent    *recentInfoStore
 	pending   []*corev1.Event
+	watcher   *watchManager
 	resources map[source]*resource.Resource
 }
 
@@ -140,6 +143,11 @@ func mapEventDirectlyToContext(ctx context.Context, client client.Client, event 
 // attempt to map an Event to one or more Spans; return true if a Span was emitted
 func (r *EventWatcher) emitSpanFromEvent(ctx context.Context, log logr.Logger, event *corev1.Event) (bool, error) {
 	involved, ref, err := objectFromEvent(ctx, r.Client, event)
+	if err != nil {
+		return false, err
+	}
+
+	err = r.watcher.watch(involved, r)
 	if err != nil {
 		return false, err
 	}
@@ -271,11 +279,12 @@ func (r *EventWatcher) runTicker() {
 	}
 }
 
-func (r *EventWatcher) initialize() {
+func (r *EventWatcher) initialize(kubeClient dynamic.Interface, mapper meta.RESTMapper) {
 	r.Lock()
 	r.startTime = time.Now()
 	r.recent = newRecentInfoStore()
 	r.resources = make(map[source]*resource.Resource)
+	r.watcher = newWatchManager(kubeClient, mapper)
 	r.Unlock()
 	go r.runTicker()
 }
@@ -288,7 +297,13 @@ func (r *EventWatcher) stop() {
 
 // SetupWithManager to set up the watcher
 func (r *EventWatcher) SetupWithManager(mgr ctrl.Manager) error {
-	r.initialize()
+	kubeClient, err := dynamic.NewForConfig(mgr.GetConfig())
+	if err != nil {
+		return err
+	}
+	mapper, err := apiutil.NewDynamicRESTMapper(mgr.GetConfig())
+
+	r.initialize(kubeClient, mapper)
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1.Event{}).
 		Complete(r)

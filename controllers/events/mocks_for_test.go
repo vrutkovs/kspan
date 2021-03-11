@@ -9,11 +9,31 @@ import (
 	"go.opentelemetry.io/otel/label"
 	tracesdk "go.opentelemetry.io/otel/sdk/export/trace"
 	"go.opentelemetry.io/otel/semconv"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	dynamicFake "k8s.io/client-go/dynamic/fake"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
+	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
+
+func newMockRESTMapper() meta.RESTMapper {
+	cfg := &rest.Config{}
+	mapper, _ := apiutil.NewDynamicRESTMapper(cfg, apiutil.WithCustomMapper(func() (meta.RESTMapper, error) {
+		baseMapper := meta.NewDefaultRESTMapper(nil)
+		// Add the object kinds that we use in fixtures.
+		baseMapper.Add(schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "deployment"}, meta.RESTScopeNamespace)
+		baseMapper.Add(schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "replicaset"}, meta.RESTScopeNamespace)
+		baseMapper.Add(schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "statefulset"}, meta.RESTScopeNamespace)
+		baseMapper.Add(schema.GroupVersionKind{Group: "", Version: "v1", Kind: "pod"}, meta.RESTScopeNamespace)
+
+		return baseMapper, nil
+	}))
+	return mapper
+}
 
 // Initialize an EventWatcher, context and logger ready for testing
 func newTestEventWatcher(initObjs ...runtime.Object) (context.Context, *EventWatcher, *fakeExporter, logr.Logger) {
@@ -30,7 +50,10 @@ func newTestEventWatcher(initObjs ...runtime.Object) (context.Context, *EventWat
 		Log:      log,
 		Exporter: exporter,
 	}
-	r.initialize()
+
+	fakeDynamic := dynamicFake.NewSimpleDynamicClient(scheme)
+	mockRESTMapper := newMockRESTMapper()
+	r.initialize(fakeDynamic, mockRESTMapper)
 
 	return ctx, r, exporter, log
 }
